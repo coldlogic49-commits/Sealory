@@ -4,23 +4,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { GIFTS, rub } from "./prices.js";
 
-const TOKEN =
-  process.env.BOT_TOKEN ||
-  process.env.TELEGRAM_BOT_TOKEN ||
-  process.env.TOKEN;
+const TOKEN = process.env.BOT_TOKEN;
 
-if (!TOKEN) throw new Error("Missing BOT_TOKEN");
+if (!TOKEN) {
+  throw new Error("BOT_TOKEN is required");
+}
 
 const bot = new Bot(TOKEN);
 
 const ADMIN_ID = 8882210622;
 const CHANNEL = "SealoryBio";
 const GIFT_ACCOUNT = "Sealory";
-
 const DB_FILE = process.env.DATA_FILE ||
   path.resolve("sealory-data.json");
 
-const emptyDB = () => ({
+const initialDB = () => ({
   users: {},
   tickets: {},
   bans: {},
@@ -29,11 +27,11 @@ const emptyDB = () => ({
   nextSale: 1
 });
 
-let db = emptyDB();
+let db = initialDB();
 
 try {
   db = {
-    ...emptyDB(),
+    ...initialDB(),
     ...JSON.parse(fs.readFileSync(DB_FILE, "utf8"))
   };
 } catch (error) {
@@ -44,10 +42,12 @@ let saving = Promise.resolve();
 
 function save() {
   const data = JSON.stringify(db, null, 2);
+
   saving = saving.catch(() => {}).then(async () => {
     await fs.promises.writeFile(DB_FILE + ".tmp", data);
     await fs.promises.rename(DB_FILE + ".tmp", DB_FILE);
   });
+
   return saving;
 }
 
@@ -99,22 +99,22 @@ function mainMenu() {
   );
 }
 
-async function show(ctx, text, kb) {
+async function show(ctx, message, kb) {
   if (ctx.callbackQuery) {
     await ctx.answerCallbackQuery().catch(() => {});
 
     try {
-      return await ctx.editMessageText(text, {
+      return await ctx.editMessageText(message, {
         reply_markup: kb
       });
     } catch (error) {
-      if (String(error).includes("message is not modified")) {
-        return;
-      }
+      if (
+        String(error).includes("message is not modified")
+      ) return;
     }
   }
 
-  return ctx.reply(text, { reply_markup: kb });
+  return ctx.reply(message, { reply_markup: kb });
 }
 
 async function home(ctx) {
@@ -190,8 +190,15 @@ async function catalog(
     )
   );
 
-  const pages = Math.max(1, Math.ceil(items.length / 10));
-  s.page = Math.max(0, Math.min(s.page, pages - 1));
+  const pages = Math.max(
+    1,
+    Math.ceil(items.length / 10)
+  );
+
+  s.page = Math.max(
+    0,
+    Math.min(s.page, pages - 1)
+  );
 
   const current = items.slice(
     s.page * 10,
@@ -209,8 +216,13 @@ async function catalog(
 
   if (current.length % 2) kb.row();
 
-  if (s.page > 0) kb.text("⬅️", "page:prev");
-  if (s.page < pages - 1) kb.text("➡️", "page:next");
+  if (s.page > 0) {
+    kb.text("⬅️", "page:prev");
+  }
+
+  if (s.page < pages - 1) {
+    kb.text("➡️", "page:next");
+  }
 
   kb.row().text("🏠 Главное меню", "home");
 
@@ -228,9 +240,11 @@ async function catalog(
 
 async function giftPage(ctx, id) {
   const gift = GIFTS[id];
+
   if (!gift) return home(ctx);
 
   const s = session(ctx.from.id);
+
   s.gift = id;
   s.stage = "gift";
 
@@ -238,11 +252,12 @@ async function giftPage(ctx, id) {
     ctx,
     "SealoryNFT | Скупка NFT\n\n" +
     "Коллекция: " + gift.name +
-    "\nЦена выкупа: " + rub(gift.price) +
-    "\n\nЦена конкретного подарка может " +
-    "потребовать уточнения по модели и фону.",
+    "\nЦена выкупа: " + rub(gift.price),
     keyboard(
-      [{ text: "Продать NFT", callback_data: "payment" }],
+      [{
+        text: "Продать NFT",
+        callback_data: "payment"
+      }],
       [{
         text: "⬅️ Назад к коллекциям",
         callback_data: "catalogback"
@@ -251,11 +266,14 @@ async function giftPage(ctx, id) {
   );
 }
 
-// СПОСОБ ПОЛУЧЕНИЯ ОПЛАТЫ
+// СПОСОБ ВЫПЛАТЫ
 
 async function payment(ctx) {
   const s = session(ctx.from.id);
-  if (s.gift === undefined) return catalog(ctx);
+
+  if (s.gift === undefined) {
+    return catalog(ctx);
+  }
 
   s.stage = "payment";
 
@@ -264,14 +282,16 @@ async function payment(ctx) {
     "SealoryNFT | Способ выплаты\n\n" +
     "Выберите, куда хотите получить оплату.\n\n" +
     "100 ⭐ = 150 ₽.\n" +
-    "Telegram Stars поступают без комиссии, " +
-    "ровно в указанном количестве.\n\n" +
-    "Ориентировочный срок выплаты после " +
-    "подтверждения сделки: от 30 секунд до 24 часов.\n\n" +
-    "Если выплата задерживается, обратитесь в поддержку.",
+    "Telegram Stars поступают без комиссии.\n\n" +
+    "Срок выплаты: от 30 секунд до 24 часов.\n\n" +
+    "Если выплата не поступила за 24 часа, " +
+    "обратитесь в поддержку.",
     keyboard(
       [
-        { text: "СБП (₽)", callback_data: "method:sbp" },
+        {
+          text: "СБП (₽)",
+          callback_data: "method:sbp"
+        },
         {
           text: "Telegram Stars ⭐",
           callback_data: "method:stars"
@@ -287,7 +307,10 @@ async function payment(ctx) {
 
 async function details(ctx, method) {
   const s = session(ctx.from.id);
-  if (s.gift === undefined) return catalog(ctx);
+
+  if (s.gift === undefined) {
+    return catalog(ctx);
+  }
 
   s.method = method;
   s.stage = "details";
@@ -300,17 +323,21 @@ async function details(ctx, method) {
     ? "SealoryNFT | СБП\n\n" +
       "Введите номер банковской карты.\n" +
       "Строго 16 цифр.\n\n" +
-      "Если администратор не сможет найти ваши " +
-      "реквизиты, он свяжется с вами."
+      "Если администратор не сможет найти " +
+      "ваши реквизиты, он свяжется с вами."
     : "SealoryNFT | Telegram Stars\n\n" +
       "Вы получите: " +
       amount.toLocaleString("ru-RU") +
       " ⭐ без комиссии.\n\n" +
-      "Введите ваш Telegram-юзернейм с @.\n\n" +
+      "Введите Telegram-юзернейм с @.\n\n" +
       "Если администратор не сможет найти " +
       "аккаунт, он свяжется с вами.";
 
-  return show(ctx, message, back("payment"));
+  return show(
+    ctx,
+    message,
+    back("payment")
+  );
 }
 
 // ЗАЯВКИ НА ПРОДАЖУ
@@ -330,7 +357,7 @@ async function createSale(ctx, value) {
     price: gift.price,
     method: s.method,
     details: value,
-    status: "Ожидает ручной проверки",
+    status: "Ожидает проверки",
     created: Date.now()
   };
 
@@ -346,7 +373,7 @@ async function createSale(ctx, value) {
     `Цена: ${rub(gift.price)}\n` +
     `Способ выплаты: ${s.method}\n` +
     `Реквизиты: ${value}\n\n` +
-    "Статус: ожидает ручной проверки"
+    "Статус: ожидает проверки"
   ).catch(console.error);
 
   return transfer(ctx);
@@ -354,16 +381,14 @@ async function createSale(ctx, value) {
 
 async function transfer(ctx) {
   const s = session(ctx.from.id);
+
   s.stage = "transfer";
 
   return show(
     ctx,
     "SealoryNFT | Передача NFT\n\n" +
-    `Отправьте NFT-подарок аккаунту @${GIFT_ACCOUNT} ` +
-    "после проверки получателя и согласования условий сделки.\n\n" +
-    "После отправки нажмите «Проверить».\n\n" +
-    "Автоматическое подтверждение поступления " +
-    "пока не подключено. Проверка выполняется вручную.",
+    "Отправьте NFT-подарок аккаунту @Sealory.\n\n" +
+    "После отправки нажмите «Проверить».",
     keyboard(
       [{
         text: "🎁 Скинуть подарок",
@@ -391,8 +416,7 @@ async function support(ctx) {
     "SealoryNFT | Техподдержка\n\n" +
     "Напишите ваш вопрос одним сообщением.\n\n" +
     "Будет создан тикет, на который ответит " +
-    "администратор.\n\n" +
-    "Не отправляйте пароли и коды входа.",
+    "администратор.",
     back()
   );
 }
@@ -413,12 +437,15 @@ async function createTicket(ctx, message) {
   };
 
   await save();
+
   session(ctx.from.id).stage = "home";
 
   await ctx.reply(
     `Ваш тикет #${id} создан.\n\n` +
     "Администратор ответит через бота.",
-    { reply_markup: mainMenu() }
+    {
+      reply_markup: mainMenu()
+    }
   );
 
   await bot.api.sendMessage(
@@ -469,7 +496,10 @@ async function tickets(ctx) {
   const all = Object.values(db.tickets)
     .sort((a, b) => b.id - a.id);
 
-  const open = all.filter(t => t.status === "open");
+  const open = all.filter(
+    t => t.status === "open"
+  );
+
   const kb = new InlineKeyboard();
 
   for (const t of open.slice(0, 20)) {
@@ -501,18 +531,25 @@ async function allTickets(ctx) {
 
   for (const t of all) {
     kb.text(
-      `#${t.id} · ${t.status === "open" ? "Открыт" : "Закрыт"}`,
+      `#${t.id} · ${
+        t.status === "open" ? "Открыт" : "Закрыт"
+      }`,
       "a:ticket:" + t.id
     ).row();
   }
 
   kb.text("⬅️ Тикеты", "a:tickets");
 
-  return show(ctx, "Последние 25 тикетов:", kb);
+  return show(
+    ctx,
+    "Последние 25 тикетов:",
+    kb
+  );
 }
 
 async function ticketView(ctx, id) {
   const t = db.tickets[String(id)];
+
   if (!t) return tickets(ctx);
 
   const kb = new InlineKeyboard()
@@ -528,8 +565,11 @@ async function ticketView(ctx, id) {
     .text("⬅️ К тикетам", "a:tickets");
 
   const messages = t.messages.slice(-8).map(m =>
-    (m.role === "admin" ? "Админ: " : "Пользователь: ") +
-    m.text.slice(0, 350)
+    (
+      m.role === "admin"
+        ? "Админ: "
+        : "Пользователь: "
+    ) + m.text.slice(0, 350)
   ).join("\n\n");
 
   return show(
@@ -547,11 +587,20 @@ async function bans(ctx) {
   const list = Object.entries(db.bans);
 
   const kb = new InlineKeyboard()
-    .text("Заблокировать по ID", "a:banAsk")
+    .text(
+      "Заблокировать по ID",
+      "a:banAsk"
+    )
     .row()
-    .text("Разблокировать по ID", "a:unbanAsk")
+    .text(
+      "Разблокировать по ID",
+      "a:unbanAsk"
+    )
     .row()
-    .text("⬅️ Админ-панель", "a:home");
+    .text(
+      "⬅️ Админ-панель",
+      "a:home"
+    );
 
   return show(
     ctx,
@@ -560,7 +609,8 @@ async function bans(ctx) {
     (
       list.slice(-15).map(([id, ban]) =>
         `${id} — ${ban.reason}`
-      ).join("\n") || "Нет заблокированных пользователей."
+      ).join("\n") ||
+      "Нет заблокированных пользователей."
     ),
     kb
   );
@@ -584,7 +634,9 @@ async function runBroadcast(ctx) {
   const s = session(ctx.from.id);
   const message = s.broadcastText;
 
-  if (!message) return adminHome(ctx);
+  if (!message || s.stage !== "broadcastConfirm") {
+    return adminHome(ctx);
+  }
 
   s.broadcastText = null;
   s.stage = "admin";
@@ -609,16 +661,22 @@ async function runBroadcast(ctx) {
       success++;
     } catch (error) {
       failed++;
-      console.error("Broadcast error:", error.message);
+      console.error(
+        "Broadcast error:",
+        error.message
+      );
     }
 
-    await new Promise(resolve => setTimeout(resolve, 70));
+    await new Promise(resolve =>
+      setTimeout(resolve, 70)
+    );
   }
 
   await bot.api.sendMessage(
     ADMIN_ID,
     "Рассылка завершена.\n\n" +
-    `Успешно: ${success}\nОшибок: ${failed}`
+    `Успешно: ${success}\n` +
+    `Ошибок: ${failed}`
   ).catch(console.error);
 }
 
@@ -656,6 +714,7 @@ bot.on("callback_query:data", async ctx => {
 
     if (d === "a:banAsk") {
       s.stage = "banAsk";
+
       return show(
         ctx,
         "Введите Telegram ID пользователя для блокировки.",
@@ -665,6 +724,7 @@ bot.on("callback_query:data", async ctx => {
 
     if (d === "a:unbanAsk") {
       s.stage = "unbanAsk";
+
       return show(
         ctx,
         "Введите Telegram ID пользователя для разблокировки.",
@@ -672,7 +732,9 @@ bot.on("callback_query:data", async ctx => {
       );
     }
 
-    if (d === "a:send") return runBroadcast(ctx);
+    if (d === "a:send") {
+      return runBroadcast(ctx);
+    }
 
     if (d === "a:cancelSend") {
       s.broadcastText = null;
@@ -680,7 +742,10 @@ bot.on("callback_query:data", async ctx => {
     }
 
     if (d.startsWith("a:ticket:")) {
-      return ticketView(ctx, Number(d.split(":")[2]));
+      return ticketView(
+        ctx,
+        Number(d.split(":")[2])
+      );
     }
 
     if (d.startsWith("a:reply:")) {
@@ -700,7 +765,10 @@ bot.on("callback_query:data", async ctx => {
 
       if (!t) return tickets(ctx);
 
-      t.status = t.status === "open" ? "closed" : "open";
+      t.status = t.status === "open"
+        ? "closed"
+        : "open";
+
       await save();
 
       return ticketView(ctx, Number(id));
@@ -712,13 +780,17 @@ bot.on("callback_query:data", async ctx => {
   if (d === "catalog" || d === "prices") {
     s.search = "";
     s.page = 0;
+
     return catalog(ctx, d === "prices");
   }
 
-  if (d === "catalogback") return catalog(ctx);
+  if (d === "catalogback") {
+    return catalog(ctx);
+  }
 
   if (d === "search") {
     s.stage = "search";
+
     return show(
       ctx,
       "Введите минимум 3 буквы названия NFT.",
@@ -726,29 +798,44 @@ bot.on("callback_query:data", async ctx => {
     );
   }
 
-  if (d === "page:prev" || d === "page:next") {
+  if (
+    d === "page:prev" ||
+    d === "page:next"
+  ) {
     s.page += d.endsWith("next") ? 1 : -1;
     return catalog(ctx);
   }
 
   if (d.startsWith("gift:")) {
-    return giftPage(ctx, Number(d.split(":")[1]));
+    return giftPage(
+      ctx,
+      Number(d.split(":")[1])
+    );
   }
 
-  if (d === "payment") return payment(ctx);
-
-  if (d === "method:sbp" || d === "method:stars") {
-    return details(ctx, d.split(":")[1]);
+  if (d === "payment") {
+    return payment(ctx);
   }
 
-  if (d === "transfer") return transfer(ctx);
+  if (
+    d === "method:sbp" ||
+    d === "method:stars"
+  ) {
+    return details(
+      ctx,
+      d.split(":")[1]
+    );
+  }
+
+  if (d === "transfer") {
+    return transfer(ctx);
+  }
 
   if (d === "verify") {
     return show(
       ctx,
-      "Поступление подарка пока не подтверждено.\n\n" +
-      "Если вы отправили NFT, обратитесь в поддержку " +
-      "и укажите номер заявки.",
+      "Вы не скинули подарок.\n\n" +
+      "Если вы уже отправили NFT, ожидайте проверки.",
       keyboard(
         [{
           text: "Тех Поддержка",
@@ -762,7 +849,9 @@ bot.on("callback_query:data", async ctx => {
     );
   }
 
-  if (d === "support") return support(ctx);
+  if (d === "support") {
+    return support(ctx);
+  }
 
   if (d === "profile") {
     const sales = Object.values(db.sales).filter(
@@ -791,7 +880,8 @@ bot.on("callback_query:data", async ctx => {
       (
         sales.map(x =>
           `#${x.id} ${x.gift} — ${rub(x.price)}\n${x.status}`
-        ).join("\n\n") || "Заявок пока нет."
+        ).join("\n\n") ||
+        "Заявок пока нет."
       ),
       back()
     );
@@ -801,11 +891,10 @@ bot.on("callback_query:data", async ctx => {
     return show(
       ctx,
       "SealoryNFT | Информация\n\n" +
-      "Сервис оформления заявок на выкуп Telegram NFT.\n\n" +
+      "Сервис выкупа Telegram NFT.\n\n" +
       "100 ⭐ = 150 ₽.\n" +
       "Звёзды без комиссии.\n" +
-      "Ориентировочный срок выплаты: 30 секунд — 24 часа " +
-      "после подтверждения сделки.\n\n" +
+      "Срок выплаты: 30 секунд — 24 часа.\n\n" +
       "Канал: @SealoryBio\n" +
       "Поддержка: тикеты внутри бота.",
       back()
@@ -862,7 +951,9 @@ bot.on("message:text", async ctx => {
       s.stage === "unbanAsk"
     ) {
       if (!/^\d{5,20}$/.test(msg)) {
-        return ctx.reply("Введите числовой Telegram ID.");
+        return ctx.reply(
+          "Введите числовой Telegram ID."
+        );
       }
 
       if (Number(msg) === ADMIN_ID) {
@@ -878,11 +969,18 @@ bot.on("message:text", async ctx => {
         };
 
         await save();
-        await ctx.reply(`Пользователь ${msg} заблокирован.`);
+
+        await ctx.reply(
+          `Пользователь ${msg} заблокирован.`
+        );
       } else {
         delete db.bans[msg];
+
         await save();
-        await ctx.reply(`Пользователь ${msg} разблокирован.`);
+
+        await ctx.reply(
+          `Пользователь ${msg} разблокирован.`
+        );
       }
 
       s.stage = "admin";
@@ -892,7 +990,9 @@ bot.on("message:text", async ctx => {
     if (s.stage === "ticketReply") {
       const t = db.tickets[String(s.ticketId)];
 
-      if (!t) return ctx.reply("Тикет не найден.");
+      if (!t) {
+        return ctx.reply("Тикет не найден.");
+      }
 
       try {
         await bot.api.sendMessage(
@@ -901,7 +1001,8 @@ bot.on("message:text", async ctx => {
         );
       } catch (error) {
         return ctx.reply(
-          "Не удалось доставить ответ: " + error.message
+          "Не удалось доставить ответ: " +
+          error.message
         );
       }
 
@@ -912,11 +1013,14 @@ bot.on("message:text", async ctx => {
       });
 
       await save();
+
       s.stage = "admin";
 
       return ctx.reply(
         `Ответ по тикету #${t.id} отправлен.`,
-        { reply_markup: adminMenu() }
+        {
+          reply_markup: adminMenu()
+        }
       );
     }
   }
@@ -927,7 +1031,9 @@ bot.on("message:text", async ctx => {
 
   if (s.stage === "search") {
     if (msg.length < 3) {
-      return ctx.reply("Введите минимум 3 буквы.");
+      return ctx.reply(
+        "Введите минимум 3 буквы."
+      );
     }
 
     s.search = msg;
@@ -965,7 +1071,9 @@ bot.on("message:text", async ctx => {
 
   return ctx.reply(
     "Выберите раздел меню или отправьте /start.",
-    { reply_markup: mainMenu() }
+    {
+      reply_markup: mainMenu()
+    }
   );
 });
 
@@ -975,4 +1083,5 @@ bot.catch(error => {
 
 bot.start();
 console.log("SealoryNFT started");
+
 
