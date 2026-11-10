@@ -1,9 +1,1 @@
-{
-  "name": "sealory-nft-bot",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {"start": "node index.js"},
-  "engines": {"node": ">=18"},
-  "dependencies": {"grammy": "^1.38.0"}
-}
+{"name":"offer-telegram-bot","version":"1.0.0","type":"module","scripts":{"start":"node index.js"},"dependencies":{"grammy":"^1.38.0"}}
