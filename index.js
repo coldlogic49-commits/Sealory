@@ -1,160 +1,77 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import fs from 'node:fs';
-import crypto from 'node:crypto';
+import { GIFTS } from './prices.js';
 
-if (!process.env.BOT_TOKEN) throw new Error('BOT_TOKEN не указан');
-const bot = new Bot(process.env.BOT_TOKEN);
-const ADMIN = 8882210622;
+const TOKEN = process.env.BOT_TOKEN;
+if (!TOKEN) throw new Error('Укажите BOT_TOKEN в переменных окружения');
+const ADMIN_ID = 8882210622;
 const RECEIVER = 'Sealory';
-const FILE = './offer-data.json';
-const SIX_HOURS = 6 * 60 * 60 * 1000;
-let db = { access:{}, requests:{}, offers:{}, drafts:{}, recipient:{}, nextRequest:1 };
-try { db = {...db,...JSON.parse(fs.readFileSync(FILE,'utf8'))}; } catch {}
-const save = () => fs.writeFileSync(FILE, JSON.stringify(db,null,2));
-const allowed = id => id === ADMIN || db.access[String(id)] === true;
-const esc = s => String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const newId = () => crypto.randomBytes(5).toString('hex');
-const keyboard = () => new InlineKeyboard().text('📝 Создать оффер','create').row().text('📋 Мои офферы','mine').row().text('🔐 Активация','activate');
-const activationKb = () => new InlineKeyboard().url('🎁 Скинуть подарок','https://t.me/Sealory').row().text('🔎 Проверить','verify');
-const activation = ctx => ctx.reply('🔐 Активация Offer\n\nДля постоянного доступа к /offer и Inline Mode отправьте обычный Telegram-подарок стоимостью 100 ⭐ на @Sealory.\n\nПосле отправки нажмите «Проверить». Администратор проверит получение подарка вручную.\n\nЭто не NFT-подарок.',{reply_markup:activationKb()});
-function parseGift(input) {
-  const raw = input.trim();
-  const match = raw.match(/(?:https?:\/\/)?(?:t\.me|telegram\.me)\/nft\/([A-Za-z][A-Za-z0-9_-]*-\d+)/i);
-  if (!match) return null;
-  const slug = match[1];
-  const m = slug.match(/^(.*)-(\d+)$/);
-  if (!m) return null;
-  const name = m[1].replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[-_]/g,' ');
-  return {slug, name, number:m[2], url:`https://t.me/nft/${slug}`};
-}
-function timeLeft(o) {
-  const remaining = Math.max(0,o.expires-Date.now());
-  return `${Math.floor(remaining/3600000)} ч. ${Math.floor((remaining%3600000)/60000)} мин.`;
-}
-function active(o) { return o.status==='open' && Date.now()<o.expires; }
-function label(o) {return `${o.gift.name} #${o.gift.number}`;}
-function offerText(o) {
-  const creator = o.creatorName || (o.creatorUsername ? '@'+o.creatorUsername : `ID ${o.creatorId}`);
-  return `🎁 <b>Предложение на NFT-подарок</b>\n\nПользователь <b>${esc(creator)}</b> предлагает Вам <b>${o.price} ⭐</b> за коллекционный предмет <a href="${o.gift.url}">${esc(label(o))}</a>.\n\n${active(o) ? `Предложение действует ещё ${timeLeft(o)}` : `Статус: ${o.status==='open'?'Срок истёк':o.status==='accepted'?'Принято':o.status==='rejected'?'Отклонено':'Отменено'}`}`;
-}
-const offerKb = o => active(o) ? new InlineKeyboard().text('Отклонить',`reject:${o.id}`).text('Принять',`accept:${o.id}`) : undefined;
-const transferKb = o => new InlineKeyboard().url('🎁 Передать NFT',o.gift.url).row().text('✅ Подтвердить передачу',`transfer:${o.id}`);
-async function sendUser(id,text,opts={}) {try {await bot.api.sendMessage(id,text,opts);}catch(e){console.error('send:',e.message);}}
-async function startDraft(ctx) {
-  if (!allowed(ctx.from.id)) return activation(ctx);
-  db.drafts[String(ctx.from.id)]={step:'gift'};save();
-  return ctx.reply('📝 Создание оффера\n\nОтправьте ссылку на конкретный NFT-подарок:\nhttps://t.me/nft/SkyStilettos-41219\n\nДля отмены: /cancel');
-}
+const CHANNEL = 'SealoryBio';
+const DB_FILE = process.env.DB_FILE || './sealory-data.json';
+const bot = new Bot(TOKEN);
+const money = n => Number(n).toLocaleString('ru-RU') + ' ₽';
+const stars = n => Math.floor(n * 100 / 145);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const load = () => { try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { return {}; } };
+const db = Object.assign({ users: {}, sales: {}, tickets: {}, nextSale: 1, nextTicket: 1, banned: [] }, load());
+function save() { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
+const sessions = new Map();
+const state = id => { if (!sessions.has(id)) sessions.set(id, {}); return sessions.get(id); };
+function register(ctx) { if (!ctx.from) return; const id = String(ctx.from.id); db.users[id] = { ...(db.users[id] || {}), username: ctx.from.username || '', first_name: ctx.from.first_name || '' }; save(); }
+function keyboard(...rows) { const k = new InlineKeyboard(); rows.forEach((r,i) => { if (i) k.row(); r.forEach(b => b.url ? k.url(b.text,b.url) : k.text(b.text,b.data)); }); return k; }
+const b = (text,data) => ({text,data});
+const u = (text,url) => ({text,url});
+async function show(ctx,text,k) { if (ctx.callbackQuery) { await ctx.answerCallbackQuery().catch(()=>{}); try { return await ctx.editMessageText(text,{reply_markup:k,parse_mode:'HTML',link_preview_options:{is_disabled:true}}); } catch {} } return ctx.reply(text,{reply_markup:k,parse_mode:'HTML',link_preview_options:{is_disabled:true}}); }
+const back = dest => keyboard([b('⬅️ Назад',dest)]);
+function mainKb() { return keyboard([b('Продать NFT','sell'),b('Продать звёзды','sellstars')],[b('Посмотреть цены','prices')],[b('Мой профиль','profile'),b('История продаж','history')],[b('Тех.Поддержка','support'),u('Новостной канал',`https://t.me/${CHANNEL}`)],[b('Основная информация','info')]); }
+function home(ctx) { state(ctx.from.id).step = ''; return show(ctx,'<b>Добро пожаловать в SealoryNFT!</b>\n\nSealoryNFT — сервис по оценке и выкупу коллекционных Telegram NFT-подарков.\nОзнакомьтесь с актуальными ценами, оформите заявку на продажу и выберите удобный способ получения выплаты.\n\nДля продолжения выберите необходимый раздел в меню.',mainKb()); }
+const catalogIntro = '🎁 <b>Укажите коллекцию вашего NFT-подарка</b>\n\nПожалуйста, укажите название коллекции, к которой относится ваш NFT-подарок. Это необходимо для определения его стоимости и дальнейшего оформления сделки.\n\n⚠️ Убедитесь, что название коллекции указано правильно, чтобы избежать ошибок при обработке вашей заявки.';
+function catalog(ctx, page=0, mode='sell', term='') { const s=state(ctx.from.id); s.step='catalog'; s.mode=mode; s.page=page; s.term=term; const arr=GIFTS.map((g,i)=>({...g,i})).filter(g=>g.name.toLowerCase().includes(term.toLowerCase())); const pages=Math.max(1,Math.ceil(arr.length/10)); page=Math.max(0,Math.min(page,pages-1)); s.page=page; const slice=arr.slice(page*10,page*10+10); const rows=[[b('✏️ Ввести название подарка',`search:${mode}`)]]; for(let i=0;i<slice.length;i+=2) rows.push(slice.slice(i,i+2).map(g=>b(g.name,`gift:${mode}:${g.i}`))); const nav=[]; if(page>0) nav.push(b('⬅️',`page:${mode}:${page-1}`)); nav.push(b(`${page+1}/${pages}`,'noop')); if(page<pages-1) nav.push(b('➡️',`page:${mode}:${page+1}`)); rows.push(nav,[b('🏠 Главное меню','home')]); return show(ctx,(mode==='sell'?catalogIntro:'💰 <b>Цены выкупа NFT</b>\n\nВыберите коллекцию, чтобы увидеть цену.')+(term?`\n\nПоиск: <b>${esc(term)}</b>`:''),keyboard(...rows)); }
+function selected(ctx,mode,index) { const g=GIFTS[index]; if(!g) return home(ctx); const s=state(ctx.from.id); s.mode=mode; s.gift=index; s.step='gift'; if(mode==='prices') return show(ctx,`🎁 <b>${esc(g.name)}</b>\n\nЦена выкупа: <b>${money(g.price)}</b>\n\nЭто цена коллекции по вашему прайсу.`,keyboard([b('Продать NFT','sellSelected')],[b('⬅️ Назад к ценам','prices')])); return show(ctx,'🔗 <b>Укажите ссылку на ваш NFT-подарок</b>\n\nПожалуйста, отправьте прямую ссылку на NFT-подарок, который вы хотите продать.\n\nСсылка необходима для проверки коллекции, модели, фона и определения стоимости подарка.\n\n⚠️ Убедитесь, что ссылка указана правильно и подарок доступен для просмотра.',back('sell')); }
+function receiptText(s, id='—') { const g=GIFTS[s.gift]; return `🧾 <b>SealoryNFT | Чек сделки</b>\n\nНомер заявки: <b>${id}</b>\nКоллекция: <b>${esc(g.name)}</b>\nСсылка: ${esc(s.link)}\nЦена выкупа: <b>${money(g.price)}</b>\nМодель и фон: требуют проверки\nСтатус: ожидает согласия\n\n⚠️ Подтверждая согласие, вы принимаете условия оформления заявки. Передача подарка выполняется на следующем этапе.`; }
+function receipt(ctx) { const s=state(ctx.from.id); s.step='receipt'; return show(ctx,receiptText(s),keyboard([b('❌ Не согласен','home'),b('✅ Согласен','agree')],[b('📜 Правила и условия','rules')],[b('⬅️ Назад','editlink')])); }
+function payment(ctx) { const s=state(ctx.from.id); s.step='payment'; return show(ctx,'💳 <b>SealoryNFT | Способ получения выплаты</b>\n\nВыберите удобный способ получения выплаты за ваш NFT-подарок.',keyboard([b('🇷🇺 СБП / Russia','pay:sbp'),b('⭐ Звёзды / TG','pay:stars')],[b('⬅️ Назад','receipt')])); }
+function payDetails(ctx,method) { const s=state(ctx.from.id); s.method=method; s.step=method==='sbp'?'sbp':'stars'; const g=GIFTS[s.gift]; return show(ctx,method==='sbp'?'💳 <b>Укажите реквизиты для получения выплаты</b>\n\nМы рады, что вы согласились с предложенными условиями сделки!\n\nДля дальнейшего оформления выплаты, пожалуйста, укажите номер банковской карты и название банка <b>одним сообщением</b>.\n\n<b>Пример:</b> <code>7777 7777 7777 7777 Т-Банк</code>\n\n🔒 Указывайте только реквизиты для перевода. Не отправляйте CVV/CVC, срок действия карты или коды подтверждения.':`⭐ <b>SealoryNFT | Получение выплаты в Stars</b>\n\nВы выбрали получение выплаты в Telegram Stars.\n\nКурс: <b>145 ₽ = 100 ⭐</b>\nЦена выкупа: <b>${money(g.price)}</b>\nК получению: <b>${stars(g.price).toLocaleString('ru-RU')} ⭐</b>\n\nУкажите ваш Telegram-юзернейм одним сообщением.\n\n<b>Пример:</b> <code>@username</code>`,back('payment')); }
+async function transfer(ctx) { const s=state(ctx.from.id); s.step='transfer'; return show(ctx,'🎁 <b>Отправка NFT-подарка</b>\n\nДля продолжения сделки отправьте ваш NFT-подарок на аккаунт <b>@Sealory</b>.\n\nПосле успешного получения и проверки подарка в разделе «Мой профиль» появится заявка на выплату денежных средств или Telegram Stars. Вам необходимо будет подтвердить её для завершения сделки.\n\n⚠️ Убедитесь, что подарок отправлен на правильный аккаунт.',keyboard([u('🎁 Отправить подарок',`https://t.me/${RECEIVER}`)],[b('✅ Я отправил, проверить','checkGift')])); }
+function currentSale(ctx) { const s=state(ctx.from.id); return s.saleId && db.sales[String(s.saleId)]; }
+async function createSale(ctx, details) { const s=state(ctx.from.id); const g=GIFTS[s.gift]; if(!g) return home(ctx); const id=db.nextSale++; db.sales[String(id)]={id,userId:ctx.from.id,username:ctx.from.username||'',gift:g.name,price:g.price,link:s.link,method:s.method,details,status:'awaiting_gift',created:Date.now()}; s.saleId=id; save(); await bot.api.sendMessage(ADMIN_ID,`🎁 Новая продажа #${id}\nПользователь: ${ctx.from.id} (@${ctx.from.username||'нет'})\nКоллекция: ${g.name}\nЦена: ${money(g.price)}\nСсылка: ${s.link}\nВыплата: ${s.method}\nРеквизиты: ${details}`,{reply_markup:keyboard([b('📦 Подарок получен',`admin:received:${id}`)],[b('❌ Отклонить',`admin:reject:${id}`)])}).catch(e=>console.error('Admin notification:',e.message)); return transfer(ctx); }
+function profile(ctx) { const id=ctx.from.id; const sales=Object.values(db.sales).filter(x=>x.userId===id).sort((a,b)=>b.id-a.id); const pending=sales.filter(x=>x.status==='ready'); const rows=pending.slice(0,8).map(x=>[b(`💳 Подтвердить выплату #${x.id}`,`confirm:${x.id}`)]); rows.push([b('⬅️ Главное меню','home')]); return show(ctx,`👤 <b>Мой профиль</b>\n\nTelegram ID: <code>${id}</code>\nПродаж: <b>${sales.length}</b>\nЗаявок на подтверждение выплаты: <b>${pending.length}</b>\n\n${pending.length?'Подтвердите заявку после проверки получения подарка.':'Активных заявок на подтверждение выплаты нет.'}`,keyboard(...rows)); }
+const statuses={awaiting_gift:'Ожидается получение подарка',ready:'Подарок получен — подтвердите выплату',confirmed:'Выплата подтверждена пользователем',paid:'Выплачено',rejected:'Отклонено'};
+function history(ctx) { const sales=Object.values(db.sales).filter(x=>x.userId===ctx.from.id).sort((a,b)=>b.id-a.id); return show(ctx,`📋 <b>История продаж</b>\n\n${sales.length?sales.slice(0,15).map(x=>`#${x.id} — ${esc(x.gift)} — ${money(x.price)}\n${statuses[x.status]||x.status}`).join('\n\n'):'У вас пока нет оформленных заявок.'}`,back('home')); }
+function support(ctx) { state(ctx.from.id).step='support'; return show(ctx,'💬 <b>Техническая поддержка SealoryNFT</b>\n\nАдминистратор: <b>@Sealory</b>\n\nНапишите ваше обращение одним сообщением. Оно будет отправлено администратору.',keyboard([u('✉️ Написать администратору','https://t.me/Sealory')],[b('⬅️ Назад','home')])); }
+function info(ctx) { return show(ctx,'ℹ️ <b>Основная информация | SealoryNFT</b>\n\nСервис по оценке и выкупу коллекционных Telegram NFT-подарков.\n\nВыплаты: СБП (Россия) или Telegram Stars.\nКурс Stars: 100 ⭐ = 145 ₽.\nПолучатель NFT: @Sealory.\nПоддержка: @Sealory.\n\nПередача NFT производится пользователем. Проверка поступления подарка выполняется администратором.',back('home')); }
+function rules(ctx) { return show(ctx,'📜 <b>Правила и условия</b>\n\n1. Пользователь указывает действительную ссылку на принадлежащий ему NFT.\n2. Стоимость рассчитывается по прайсу коллекции; модель и фон могут потребовать отдельной оценки.\n3. Перед отправкой подарка пользователь проверяет аккаунт получателя @Sealory.\n4. Заявка на выплату появляется только после подтверждения получения подарка администратором.\n5. Не передавайте CVV/CVC, пароли и коды подтверждения.\n6. Подтверждение заявки не является доказательством уже совершённой выплаты.',back('receipt')); }
+function sellStars(ctx) { state(ctx.from.id).step='sellstars'; return show(ctx,'⭐ <b>Продать звёзды</b>\n\nУкажите количество Telegram Stars, которое хотите продать.\n\nОриентировочная сумма по курсу 100 ⭐ = 145 ₽ будет рассчитана автоматически.\n\nПосле отправки количества звёзд администратор согласует способ передачи и выплаты.',back('home')); }
 
-bot.command('start',ctx=>ctx.reply('🤝 Offer\n\nСоздавайте предложения на конкретные Telegram NFT-подарки и отправляйте их через Inline Mode.\n\n/offer — создать предложение\n/recipient @username — получатель для передачи NFT\n/help — инструкция',{reply_markup:keyboard()}));
-bot.command('help',ctx=>ctx.reply('1. Активируйте доступ обычным подарком за 100 ⭐ на @Sealory.\n2. Введите /offer, ссылку на NFT и цену в ⭐.\n3. В любом чате введите @username_бота и выберите оффер.\n4. Получатель нажимает «Принять» или «Отклонить».\n5. После принятия получатель вручную передаёт NFT и запрашивает проверку передачи.\n\n/recipient @username — укажите Telegram-аккаунт для передачи.\n\nВажно: бот не резервирует Stars и не переводит их автоматически.')); 
-bot.command('offer',startDraft);
-bot.command('cancel',ctx=>{delete db.drafts[String(ctx.from.id)];save();return ctx.reply('Создание отменено.');});
-bot.command('recipient',async ctx=>{
-  if(!allowed(ctx.from.id))return activation(ctx);
-  const username=(ctx.match||'').trim().replace(/^@/,'');
-  if(!/^[a-zA-Z0-9_]{5,32}$/.test(username))return ctx.reply('Использование: /recipient @username');
-  db.recipient[String(ctx.from.id)]=username;save();
-  return ctx.reply(`Получатель для передачи: @${username}\n\nУказание username не проверяет владение аккаунтом.`);
-});
-bot.callbackQuery('create',async ctx=>{await ctx.answerCallbackQuery();return startDraft(ctx);});
-bot.callbackQuery('activate',async ctx=>{await ctx.answerCallbackQuery();return allowed(ctx.from.id)?ctx.reply('✅ Доступ уже активирован.'):activation(ctx);});
-bot.callbackQuery('verify',async ctx=>{
-  await ctx.answerCallbackQuery();
-  if(allowed(ctx.from.id))return ctx.reply('✅ Доступ уже активирован.');
-  const pending=Object.values(db.requests).find(r=>r.userId===ctx.from.id&&r.status==='pending');
-  if(pending)return ctx.reply(`⏳ Заявка #${pending.id} уже ожидает проверки.`);
-  const id=db.nextRequest++;
-  db.requests[id]={id,userId:ctx.from.id,username:ctx.from.username||'',status:'pending',created:Date.now()};save();
-  try {
-    await bot.api.sendMessage(ADMIN,`🔔 Активация Offer #${id}\n\nПользователь: ${ctx.from.first_name||'Без имени'}\nID: ${ctx.from.id}\nUsername: @${ctx.from.username||'не указан'}\n\nПроверьте обычный Telegram-подарок стоимостью 100 ⭐ на @Sealory.`,{reply_markup:new InlineKeyboard().text('✅ Подтвердить',`grant:${id}`).row().text('❌ Отклонить',`deny:${id}`)});
-  } catch(e){delete db.requests[id];save();return ctx.reply('Не удалось отправить заявку. Администратор должен сначала открыть чат с ботом через /start.');}
-  return ctx.reply(`⏳ Заявка #${id} отправлена администратору.`);
-});
-bot.callbackQuery(/^(grant|deny):(\d+)$/,async ctx=>{
-  if(ctx.from.id!==ADMIN)return ctx.answerCallbackQuery({text:'Нет доступа',show_alert:true});
-  const [,action,id]=ctx.match;const r=db.requests[id];
-  if(!r||r.status!=='pending')return ctx.answerCallbackQuery({text:'Заявка уже обработана',show_alert:true});
-  r.status=action==='grant'?'approved':'denied';
-  if(action==='grant')db.access[String(r.userId)]=true;
-  save();await ctx.answerCallbackQuery();
-  await ctx.editMessageText(`Заявка #${id}: ${r.status}\nПользователь: ${r.userId}`);
-  await sendUser(r.userId,action==='grant'?'✅ Доступ к /offer и Inline Mode открыт навсегда.':'❌ Получение подарка не подтверждено. Проверьте отправку и подайте заявку повторно.');
-});
-bot.callbackQuery('mine',async ctx=>{
-  await ctx.answerCallbackQuery();if(!allowed(ctx.from.id))return activation(ctx);
-  const arr=Object.values(db.offers).filter(o=>o.creatorId===ctx.from.id).sort((a,b)=>b.created-a.created).slice(0,20);
-  if(!arr.length)return ctx.reply('Пока нет офферов. Создать: /offer');
-  const kb=new InlineKeyboard();for(const o of arr)kb.text(`${label(o).slice(0,32)} · ${o.price} ⭐`, `view:${o.id}`).row();
-  return ctx.reply('📋 Мои офферы',{reply_markup:kb});
-});
-bot.callbackQuery(/^view:([a-f0-9]+)$/,async ctx=>{
-  await ctx.answerCallbackQuery();const o=db.offers[ctx.match[1]];
-  if(!o||o.creatorId!==ctx.from.id)return ctx.reply('Не найдено.');
-  const kb=active(o)?new InlineKeyboard().text('🚫 Отменить',`canceloffer:${o.id}`):undefined;
-  return ctx.reply(offerText(o),{parse_mode:'HTML',link_preview_options:{is_disabled:false},reply_markup:kb});
-});
-bot.callbackQuery(/^canceloffer:([a-f0-9]+)$/,async ctx=>{
-  const o=db.offers[ctx.match[1]];
-  if(!o||o.creatorId!==ctx.from.id||!active(o))return ctx.answerCallbackQuery({text:'Отмена невозможна',show_alert:true});
-  o.status='cancelled';save();await ctx.answerCallbackQuery({text:'Отменено'});
-  await ctx.editMessageText(offerText(o),{parse_mode:'HTML'});
-});
-bot.on('message:text',async ctx=>{
-  const uid=String(ctx.from.id),draft=db.drafts[uid];
-  if(!draft||!allowed(ctx.from.id)||ctx.message.text.startsWith('/'))return;
-  const value=ctx.message.text.trim();
-  if(draft.step==='gift'){
-    const gift=parseGift(value);
-    if(!gift)return ctx.reply('Нужна ссылка на конкретный NFT вида https://t.me/nft/SkyStilettos-41219');
-    draft.gift=gift;draft.step='price';save();return ctx.reply(`🎁 ${label({gift})}\n\nВведите сумму предложения в ⭐ (1–1 000 000).`);
-  }
-  if(draft.step==='price'){
-    if(!/^\d+$/.test(value)||Number(value)<1||Number(value)>1000000)return ctx.reply('Введите целое число от 1 до 1 000 000.');
-    const id=newId(),o={id,gift:draft.gift,price:Number(value),creatorId:ctx.from.id,creatorUsername:ctx.from.username||'',creatorName:ctx.from.first_name||'',recipient:db.recipient[uid]||'',status:'open',created:Date.now(),expires:Date.now()+SIX_HOURS};
-    db.offers[id]=o;delete db.drafts[uid];save();
-    const me=await bot.api.getMe();
-    return ctx.reply(`✅ Оффер создан!\n\n${label(o)}\n${o.price} ⭐\nДействует 6 часов.\n\nОпубликовать в любом чате: @${me.username} ${id}`,{reply_markup:new InlineKeyboard().switchInlineCurrent('📤 Выбрать оффер')});
-  }
-});
-bot.on('inline_query',async ctx=>{
-  if(!allowed(ctx.from.id))return ctx.answerInlineQuery([{type:'article',id:'locked',title:'🔒 Активируйте доступ',description:'Обычный подарок за 100 ⭐',input_message_content:{message_text:'Для использования Offer сначала активируйте доступ в боте.'}}],{cache_time:0,is_personal:true,button:{text:'🔓 Активация',start_parameter:'activate'}});
-  const q=ctx.inlineQuery.query.trim().toLowerCase();
-  const offers=Object.values(db.offers).filter(o=>o.creatorId===ctx.from.id&&active(o)&&(!q||o.id.includes(q)||label(o).toLowerCase().includes(q))).sort((a,b)=>b.created-a.created).slice(0,30);
-  const results=offers.map(o=>({type:'article',id:o.id,title:`${label(o)} — ${o.price} ⭐`,description:'Предложение действует 6 часов',input_message_content:{message_text:offerText(o),parse_mode:'HTML',link_preview_options:{is_disabled:false}},reply_markup:offerKb(o),url:o.gift.url}));
-  await ctx.answerInlineQuery(results,{cache_time:0,is_personal:true,button:{text:'📝 Создать оффер',start_parameter:'create'}});
-});
-bot.callbackQuery(/^(accept|reject):([a-f0-9]+)$/,async ctx=>{
-  const [,action,id]=ctx.match,o=db.offers[id];
-  if(!o||!active(o))return ctx.answerCallbackQuery({text:'Предложение уже недействительно',show_alert:true});
-  if(ctx.from.id===o.creatorId)return ctx.answerCallbackQuery({text:'Нельзя отвечать на собственный оффер',show_alert:true});
-  // Если указан получатель, только этот username может принять оффер.
-  if(o.recipient&&(!ctx.from.username||o.recipient.toLowerCase()!==ctx.from.username.toLowerCase()))return ctx.answerCallbackQuery({text:`Оффер адресован @${o.recipient}`,show_alert:true});
-  o.status=action==='accept'?'accepted':'rejected';o.responderId=ctx.from.id;o.responderUsername=ctx.from.username||'';o.closed=Date.now();save();
-  await ctx.answerCallbackQuery({text:action==='accept'?'Предложение принято':'Предложение отклонено'});
-  const message=action==='accept'?`🤝 Предложение принято\n\n${label(o)}\nЦена: ${o.price} ⭐\n\nПередача NFT выполняется вручную. Подтверждение передачи проверяется администратором. Оплата Stars не резервируется ботом.`:`❌ Предложение отклонено\n\n${label(o)}`;
-  try{await ctx.editMessageText(message,{reply_markup:action==='accept'?transferKb(o):undefined});}catch(e){console.error('edit inline:',e.message);}
-  await sendUser(o.creatorId,`Offer #${id}: ${action==='accept'?'принят':'отклонён'} пользователем ${ctx.from.username?'@'+ctx.from.username:ctx.from.id}.`);
-  await sendUser(ctx.from.id,message,action==='accept'?{reply_markup:transferKb(o)}:{});
-});
-bot.callbackQuery(/^transfer:([a-f0-9]+)$/,async ctx=>{
-  const o=db.offers[ctx.match[1]];
-  if(!o||o.status!=='accepted'||o.responderId!==ctx.from.id)return ctx.answerCallbackQuery({text:'Нет доступа к заявке',show_alert:true});
-  if(o.transferStatus==='pending')return ctx.answerCallbackQuery({text:'Заявка уже на проверке',show_alert:true});
-  if(o.transferStatus==='confirmed')return ctx.answerCallbackQuery({text:'Уже подтверждено',show_alert:true});
-  o.transferStatus='pending';save();
-  try{await bot.api.sendMessage(ADMIN,`🎁 Проверка передачи NFT\n\nОффер: #${o.id}\nNFT: ${label(o)}\nСсылка: ${o.gift.url}\nПредложение: ${o.price} ⭐\nАвтор: ${o.creatorId}\nПринявший: ${o.responderId}\n\nПроверьте передачу самостоятельно. Бот не подтверждает её автоматически.`,{reply_markup:new InlineKeyboard().text('✅ Передача подтверждена',`transferok:${o.id}`).row().text('❌ Не подтверждена',`transferno:${o.id}`)});}catch(e){o.transferStatus='none';save();return ctx.answerCallbackQuery({text:'Не удалось отправить админу',show_alert:true});}
-  await ctx.answerCallbackQuery({text:'Отправлено на проверку'});
-  await ctx.reply('⏳ Запрос на подтверждение передачи отправлен администратору.');
-});
-bot.callbackQuery(/^transfer(ok|no):([a-f0-9]+)$/,async ctx=>{
-  if(ctx.from.id!==ADMIN)return ctx.answerCallbackQuery({text:'Нет доступа',show_alert:true});
-  const [,action,id]=ctx.match,o=db.offers[id];
-  if(!o||o.transferStatus!=='pending')return ctx.answerCallbackQuery({text:'Уже обработано',show_alert:true});
-  o.transferStatus=action==='ok'?'confirmed':'rejected';save();await ctx.answerCallbackQuery();
-  await ctx.editMessageText(`Оффер #${id}: передача ${action==='ok'?'подтверждена':'не подтверждена'}.`);
-  const msg=action==='ok'?`✅ Передача ${label(o)} подтверждена администратором.\n\nЭто не подтверждение оплаты Stars.`:`❌ Передача ${label(o)} не подтверждена администратором.`;
-  await sendUser(o.creatorId,msg);await sendUser(o.responderId,msg);
-});
-bot.catch(e=>console.error('Bot error:',e.error));
+bot.use(async (ctx,next)=>{ if(ctx.from) { register(ctx); if(db.banned.includes(ctx.from.id) && ctx.from.id!==ADMIN_ID) { if(ctx.message) await ctx.reply('Доступ ограничен. Поддержка: @Sealory'); else if(ctx.callbackQuery) await ctx.answerCallbackQuery({text:'Доступ ограничен'}); return; } } return next(); });
+bot.command('start',home);
+bot.command('admin',ctx=>ctx.from.id===ADMIN_ID?show(ctx,'🔐 Администратор SealoryNFT\n\nЗаявки на проверку приходят сюда автоматически.',keyboard([b('📋 Заявки','admin:list')],[b('🏠 Меню','home')])):ctx.reply('Нет доступа.'));
+bot.callbackQuery('noop',ctx=>ctx.answerCallbackQuery());
+bot.callbackQuery('home',home);
+bot.callbackQuery('sell',ctx=>catalog(ctx,0,'sell'));
+bot.callbackQuery('prices',ctx=>catalog(ctx,0,'prices'));
+bot.callbackQuery(/^page:(sell|prices):(\d+)$/,ctx=>catalog(ctx,Number(ctx.match[2]),ctx.match[1],state(ctx.from.id).term||''));
+bot.callbackQuery(/^search:(sell|prices)$/,ctx=>{const s=state(ctx.from.id);s.step='search';s.mode=ctx.match[1];return show(ctx,'🔎 <b>Поиск коллекции</b>\n\nВведите название NFT-подарка сообщением (можно часть названия).',back(s.mode==='sell'?'sell':'prices'));});
+bot.callbackQuery(/^gift:(sell|prices):(\d+)$/,ctx=>selected(ctx,ctx.match[1],Number(ctx.match[2])));
+bot.callbackQuery('sellSelected',ctx=>selected(ctx,'sell',state(ctx.from.id).gift));
+bot.callbackQuery('editlink',ctx=>selected(ctx,'sell',state(ctx.from.id).gift));
+bot.callbackQuery('receipt',receipt);
+bot.callbackQuery('rules',rules);
+bot.callbackQuery('agree',payment);
+bot.callbackQuery('payment',payment);
+bot.callbackQuery(/^pay:(sbp|stars)$/,ctx=>payDetails(ctx,ctx.match[1]));
+bot.callbackQuery('checkGift',async ctx=>{await ctx.answerCallbackQuery(); const sale=currentSale(ctx); if(sale && sale.status==='ready') return show(ctx,'✅ Подарок подтверждён администратором. Откройте «Мой профиль» для подтверждения заявки на выплату.',keyboard([b('👤 Мой профиль','profile')])); return show(ctx,'❌ <b>Подарок не обнаружен</b>\n\nМы пока не получили подтверждение получения вашего NFT-подарка. Убедитесь, что он отправлен на указанный аккаунт, и повторите проверку.',keyboard([b('🔄 Повторить проверку','checkGift')],[u('🎁 Отправить подарок','https://t.me/Sealory')],[b('👤 Мой профиль','profile')]));});
+bot.callbackQuery('profile',profile);
+bot.callbackQuery('history',history);
+bot.callbackQuery('support',support);
+bot.callbackQuery('info',info);
+bot.callbackQuery('sellstars',sellStars);
+bot.callbackQuery(/^confirm:(\d+)$/,async ctx=>{const sale=db.sales[ctx.match[1]];if(!sale||sale.userId!==ctx.from.id||sale.status!=='ready')return ctx.answerCallbackQuery({text:'Заявка недоступна',show_alert:true});sale.status='confirmed';save();await show(ctx,`✅ Заявка #${sale.id} подтверждена.\n\nВыплата ожидает исполнения администратором.`,back('profile'));await bot.api.sendMessage(ADMIN_ID,`Пользователь ${ctx.from.id} подтвердил заявку на выплату #${sale.id}.`,{reply_markup:keyboard([b('💸 Выплата выполнена',`admin:paid:${sale.id}`)])}).catch(console.error);});
+bot.callbackQuery('admin:list',ctx=>{if(ctx.from.id!==ADMIN_ID)return ctx.answerCallbackQuery({text:'Нет доступа'});const items=Object.values(db.sales).filter(x=>['awaiting_gift','ready','confirmed'].includes(x.status)).slice(-15).reverse();return show(ctx,'📋 <b>Заявки</b>',keyboard(...items.map(x=>[b(`#${x.id} ${x.gift} — ${statuses[x.status]}`,`admin:view:${x.id}`)]),[b('⬅️ Назад','home')]));});
+bot.callbackQuery(/^admin:view:(\d+)$/,ctx=>{if(ctx.from.id!==ADMIN_ID)return ctx.answerCallbackQuery({text:'Нет доступа'});const x=db.sales[ctx.match[1]];if(!x)return ctx.answerCallbackQuery({text:'Не найдено'});return show(ctx,`Заявка #${x.id}\nПользователь: ${x.userId}\nNFT: ${esc(x.gift)}\nЦена: ${money(x.price)}\nСсылка: ${esc(x.link)}\nРеквизиты: ${esc(x.details)}\nСтатус: ${statuses[x.status]}`,keyboard([b('📦 Подарок получен',`admin:received:${x.id}`)],[b('💸 Выплата выполнена',`admin:paid:${x.id}`)],[b('❌ Отклонить',`admin:reject:${x.id}`)],[b('⬅️ Назад','admin:list')]));});
+bot.callbackQuery(/^admin:(received|paid|reject):(\d+)$/,async ctx=>{if(ctx.from.id!==ADMIN_ID)return ctx.answerCallbackQuery({text:'Нет доступа'});const action=ctx.match[1],x=db.sales[ctx.match[2]];if(!x)return ctx.answerCallbackQuery({text:'Заявка не найдена'});if(action==='received'&&x.status!=='awaiting_gift')return ctx.answerCallbackQuery({text:'Недопустимый статус'});if(action==='paid'&&x.status!=='confirmed')return ctx.answerCallbackQuery({text:'Сначала пользователь должен подтвердить выплату'});if(action==='reject'&&['paid','rejected'].includes(x.status))return ctx.answerCallbackQuery({text:'Уже обработано'});x.status={received:'ready',paid:'paid',reject:'rejected'}[action];save();await ctx.answerCallbackQuery({text:'Статус обновлён'});await bot.api.sendMessage(x.userId,action==='received'?`🎁 Подарок по заявке #${x.id} подтверждён.\n\nОткройте «Мой профиль» и подтвердите заявку на выплату.`:action==='paid'?`✅ Выплата по заявке #${x.id} отмечена администратором как выполненная.`:`❌ Заявка #${x.id} отклонена. Свяжитесь с @Sealory.`,{reply_markup:keyboard([b('👤 Мой профиль','profile')])}).catch(console.error);return show(ctx,`Заявка #${x.id}: ${statuses[x.status]}`,back('admin:list'));});
+
+bot.on('message:text',async ctx=>{const text=ctx.message.text.trim();const s=state(ctx.from.id);if(text.startsWith('/'))return; if(s.step==='search'){const found=GIFTS.filter(g=>g.name.toLowerCase().includes(text.toLowerCase()));if(!found.length)return ctx.reply('Коллекция не найдена. Попробуйте другое название.',{reply_markup:back(s.mode==='sell'?'sell':'prices')});return catalog(ctx,0,s.mode,text);} if(s.step==='gift'){if(!/^https:\/\/(?:t\.me|telegram\.me)\/nft\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(text))return ctx.reply('Укажите прямую ссылку вида https://t.me/nft/...');s.link=text;return receipt(ctx);} if(s.step==='sbp'){const m=text.match(/^([\d ]{16,23})\s+(.{2,60})$/u);const digits=m?.[1].replace(/\s/g,'');if(!m||digits.length!==16||!/^[0-9]{16}$/.test(digits))return ctx.reply('Укажите 16 цифр карты и название банка одним сообщением.\nПример: 7777 7777 7777 7777 Т-Банк');return createSale(ctx,`Карта **** ${digits.slice(-4)}; банк: ${m[2].trim()}`);} if(s.step==='stars'){if(!/^@[a-zA-Z0-9_]{5,32}$/.test(text))return ctx.reply('Укажите корректный юзернейм, например @username');return createSale(ctx,`${text}; к выплате ${stars(GIFTS[s.gift].price)} Stars`);} if(s.step==='support'){s.step='';const id=db.nextTicket++;db.tickets[id]={id,userId:ctx.from.id,text,created:Date.now()};save();await bot.api.sendMessage(ADMIN_ID,`💬 Обращение #${id}\nОт: ${ctx.from.id} (@${ctx.from.username||'нет'})\n\n${text}`).catch(console.error);return ctx.reply('Ваше обращение передано администратору @Sealory.');} if(s.step==='sellstars'){const qty=Number(text);if(!Number.isInteger(qty)||qty<=0||qty>1e7)return ctx.reply('Укажите положительное целое количество звёзд.');s.step='';const id=db.nextTicket++;db.tickets[id]={id,userId:ctx.from.id,text:`Продажа Stars: ${qty} ⭐, ориентировочно ${money(qty*145/100)}`,created:Date.now()};save();await bot.api.sendMessage(ADMIN_ID,`⭐ Запрос на продажу Stars #${id}\nПользователь: ${ctx.from.id}\nКоличество: ${qty} ⭐\nРасчёт: ${money(qty*145/100)}\nСвяжитесь с пользователем для согласования передачи.`).catch(console.error);return ctx.reply(`Заявка на продажу ${qty} ⭐ принята. Ориентировочная сумма: ${money(qty*145/100)}. Администратор @Sealory согласует детали.`);} return home(ctx);});
+bot.catch(err=>console.error('Bot error:',err.error));
 bot.start();
+console.log('SealoryNFT started');
